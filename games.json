@@ -1,0 +1,82 @@
+[
+    {
+        "Id": "1",
+        "Name": "MSFS 2024 (Steam)",
+        "Method": "Steam",
+        "AppId": "2537590",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "FlightSimulator2024.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "2",
+        "Name": "MSFS 2020 (Steam)",
+        "Method": "Steam",
+        "AppId": "1250410",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "FlightSimulator.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "3",
+        "Name": "DCS World (Steam)",
+        "Method": "Steam",
+        "AppId": "223750",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "DCS.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "5",
+        "Name": "MSFS 2024 (Store/GamePass)",
+        "Method": "Store",
+        "AppId": null,
+        "StorePattern": "Limitless|MicrosoftFlightSimulator|FlightSimulator",
+        "Path": null,
+        "ExeName": "FlightSimulator2024.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "6",
+        "Name": "MSFS 2020 (Store/GamePass)",
+        "Method": "Store",
+        "AppId": null,
+        "StorePattern": "Microsoft.FlightSimulator",
+        "Path": null,
+        "ExeName": "FlightSimulator.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "7",
+        "Name": "DCS World (Standalone)",
+        "Method": "DCSStandalone",
+        "AppId": null,
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "DCS.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "8",
+        "Name": "X-Plane 12 (Steam)",
+        "Method": "Steam",
+        "AppId": "2014780",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "X-Plane.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "9",
+        "Name": "X-Plane 12 (Standalone)",
+        "Method": "XPlaneStandalone",
+        "AppId": null,
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "X-Plane.exe",
+        "IsVR": true
+    }
+]

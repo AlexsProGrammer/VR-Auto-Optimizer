@@ -8,8 +8,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Resolve script directory and core paths
-$ScriptDir = Split-Path -Parent $PSCommandPath
+$ScriptDir  = Split-Path -Parent $PSCommandPath
 $ConfigPath = Join-Path $ScriptDir 'config.json'
+$GamesPath  = Join-Path $ScriptDir 'games.json'
 $LogFile    = Join-Path $ScriptDir 'sim_launcher.log'
 
 #endregion HEADER & GLOBALS
@@ -165,8 +166,10 @@ $DefaultConfig = @{
         iCloud          = $true
         Custom          = @()   # array of @{ Command=""; Args="" }
     }
-    DefaultSim       = $null
-    AutoRunOnStart   = $false
+    DefaultSim              = $null
+    AutoRunOnStart          = $false
+    RestoreOnlyActiveApps   = $true
+    CustomAppsToStartAfter  = ""
 }
 
 function Save-Config {
@@ -787,56 +790,38 @@ function Invoke-SystemPrep {
 #>
 
 # ------------------------------------------------------------
-# SIM DEFINITIONS
+# GAME LIBRARY (loaded from games.json)
 # ------------------------------------------------------------
-$SimDefinitions = @{
-    "1" = @{
-        Name        = "MSFS 2024 (Steam)"
-        Method      = "Steam"
-        SteamAppId  = "2537590"
-        ExeName     = "FlightSimulator2024.exe"
+function Load-Games {
+    if (-not (Test-Path $GamesPath)) {
+        Write-ErrorUI "games.json not found at $GamesPath"
+        Write-Log "games.json not found at $GamesPath" -Level ERROR
+        return @()
     }
-    "2" = @{
-        Name        = "MSFS 2020 (Steam)"
-        Method      = "Steam"
-        SteamAppId  = "1250410"
-        ExeName     = "FlightSimulator.exe"
+
+    try {
+        $json = Get-Content -Path $GamesPath -Raw
+        $games = $json | ConvertFrom-Json
+        Write-Log "Game library loaded from $GamesPath ($($games.Count) entries)"
+        return $games
     }
-    "3" = @{
-        Name        = "DCS World (Steam)"
-        Method      = "Steam"
-        SteamAppId  = "223750"
-        ExeName     = "DCS.exe"
-    }
-    "5" = @{
-        Name        = "MSFS 2024 (Store/GamePass)"
-        Method      = "Store"
-        ExeName     = "FlightSimulator2024.exe"
-        StorePattern = "Limitless|MicrosoftFlightSimulator|FlightSimulator"
-    }
-    "6" = @{
-        Name        = "MSFS 2020 (Store/GamePass)"
-        Method      = "Store"
-        ExeName     = "FlightSimulator.exe"
-        StorePattern = "Microsoft.FlightSimulator"
-    }
-    "7" = @{
-        Name        = "DCS World (Standalone)"
-        Method      = "DCSStandalone"
-        ExeName     = "DCS.exe"
-    }
-    "8" = @{
-        Name        = "X-Plane 12 (Steam)"
-        Method      = "Steam"
-        SteamAppId  = "2014780"
-        ExeName     = "X-Plane.exe"
-    }
-    "9" = @{
-        Name        = "X-Plane 12 (Standalone)"
-        Method      = "XPlaneStandalone"
-        ExeName     = "X-Plane.exe"
+    catch {
+        Write-ErrorUI "Failed to parse games.json. Check the file for syntax errors."
+        Write-Log "Failed to parse games.json: $_" -Level ERROR
+        return @()
     }
 }
+
+function Get-GameById {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Id
+    )
+    return $Global:GamesList | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+}
+
+# Load game library at script start
+$Global:GamesList = Load-Games
 
 # ------------------------------------------------------------
 # Resolve Store URI
@@ -1022,19 +1007,19 @@ function Launch-Simulator {
         [string]$SimId
     )
 
-    if (-not $SimDefinitions.ContainsKey($SimId)) {
+    $sim = Get-GameById -Id $SimId
+    if ($null -eq $sim) {
         Write-ErrorUI "Invalid simulator selection."
         return $null
     }
 
-    $sim = $SimDefinitions[$SimId]
     Write-Info "Launching: $($sim.Name)"
     Write-Log "Launching simulator: $($sim.Name)"
 
     switch ($sim.Method) {
-        "Steam"          { Launch-SteamSim -AppId $sim.SteamAppId }
-        "Store"          { Launch-StoreSim -Pattern $sim.StorePattern }
-        "DCSStandalone"  { Launch-DCSStandalone }
+        "Steam"            { Launch-SteamSim -AppId $sim.AppId }
+        "Store"            { Launch-StoreSim -Pattern $sim.StorePattern }
+        "DCSStandalone"    { Launch-DCSStandalone }
         "XPlaneStandalone" { Launch-XPlaneStandalone }
     }
 
@@ -1120,14 +1105,9 @@ function Show-SimMenu {
     Clear-Host
     Show-Box -Title "SELECT YOUR SIMULATOR"
 
-    Write-White "  1) MSFS 2024 (Steam)"
-    Write-White "  2) MSFS 2020 (Steam)"
-    Write-White "  3) DCS World (Steam)"
-    Write-White "  5) MSFS 2024 (Store/GamePass)"
-    Write-White "  6) MSFS 2020 (Store/GamePass)"
-    Write-White "  7) DCS World (Standalone)"
-    Write-White "  8) X-Plane 12 (Steam)"
-    Write-White "  9) X-Plane 12 (Standalone)"
+    foreach ($game in $Global:GamesList) {
+        Write-White "  $($game.Id)) $($game.Name)"
+    }
     Write-White ""
     Write-White "  B) Back"
     Write-White "  X) Exit"
@@ -1208,9 +1188,9 @@ function Show-ConfigMenu {
 
 function Set-DefaultSim {
     Show-SimMenu
-    $sel = Read-Choice -Prompt "Enter default sim ID (1-9, or blank to cancel):"
+    $sel = Read-Choice -Prompt "Enter default sim ID (or blank to cancel):"
     if ([string]::IsNullOrWhiteSpace($sel)) { return }
-    if (-not $SimDefinitions.ContainsKey($sel)) {
+    if ($null -eq (Get-GameById -Id $sel)) {
         Write-ErrorUI "Invalid sim ID."
         Start-Sleep -Seconds 2
         return
@@ -1330,7 +1310,7 @@ function Run-SimFlow {
         return
     }
 
-    Show-Box -Title "$($SimDefinitions[$SimId].Name) RUNNING"
+    Show-Box -Title "$((Get-GameById -Id $SimId).Name) RUNNING"
     Write-White "  Do not close this window while the simulator is running."
     Write-Host ""
 
@@ -1366,7 +1346,7 @@ function Main-Loop {
                     $sel = Read-Choice -Prompt "Selection (1-9/B/X):"
                     if ($sel -match '^[xX]$') { Close-LogSession; exit }
                     if ($sel -match '^[bB]$') { break }
-                    if (-not $SimDefinitions.ContainsKey($sel)) {
+                    if ($null -eq (Get-GameById -Id $sel)) {
                         Write-ErrorUI "Invalid selection."
                         Start-Sleep -Seconds 2
                         continue
