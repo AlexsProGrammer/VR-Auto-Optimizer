@@ -359,6 +359,31 @@ function Stop-ProcessSafe {
     }
 }
 
+function Test-ProcessRunning {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    return ($null -ne (Get-Process -Name $Name -ErrorAction SilentlyContinue))
+}
+
+function Get-ProcessNameFromCommand {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Command
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Command)) { return $null }
+
+    $leaf = Split-Path -Leaf $Command
+    if ([string]::IsNullOrWhiteSpace($leaf)) {
+        $leaf = $Command
+    }
+
+    return ($leaf -replace '\.exe$','')
+}
+
 function Start-ProcessSafe {
     param(
         [Parameter(Mandatory)]
@@ -367,12 +392,31 @@ function Start-ProcessSafe {
     )
 
     try {
-        if ($Args) {
-            Start-Process -FilePath $Command -ArgumentList $Args | Out-Null
-        } else {
-            Start-Process -FilePath $Command | Out-Null
+        if ($Command -ieq 'explorer.exe') {
+            if ($Args) {
+                Start-Process -FilePath 'explorer.exe' -ArgumentList $Args | Out-Null
+            }
+            else {
+                Start-Process -FilePath 'explorer.exe' | Out-Null
+            }
         }
-        Write-Log "Started process: $Command $Args"
+        elseif (Test-Path $Command) {
+            $argLine = "`"$Command`""
+            if ($Args) {
+                $argLine = "$argLine $Args"
+            }
+            # Launch via Explorer to avoid inheriting elevated token for restored user apps.
+            Start-Process -FilePath 'explorer.exe' -ArgumentList $argLine | Out-Null
+        }
+        else {
+            if ($Args) {
+                Start-Process -FilePath $Command -ArgumentList $Args | Out-Null
+            }
+            else {
+                Start-Process -FilePath $Command | Out-Null
+            }
+        }
+        Write-Log "Started process (user context): $Command $Args"
         Write-Success "Started: $Command"
     }
     catch {
@@ -420,7 +464,12 @@ function Invoke-RestartBuiltIn {
         if ($Config.RestoreOnlyActiveApps -eq $false -or 'msedge' -in $Global:PreSessionRunningApps) {
             $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
             if (Test-Path $edgePath) {
-                Start-ProcessSafe -Command $edgePath
+                if (Test-ProcessRunning -Name 'msedge') {
+                    Write-Log "Skip restart for Edge (already running)."
+                }
+                else {
+                    Start-ProcessSafe -Command $edgePath
+                }
             }
         }
     }
@@ -430,7 +479,12 @@ function Invoke-RestartBuiltIn {
         if ($Config.RestoreOnlyActiveApps -eq $false -or 'Discord' -in $Global:PreSessionRunningApps) {
             $discordUpdater = Join-Path $env:LOCALAPPDATA "Discord\Update.exe"
             if (Test-Path $discordUpdater) {
-                Start-ProcessSafe -Command $discordUpdater -Args "--processStart Discord.exe"
+                if (Test-ProcessRunning -Name 'Discord') {
+                    Write-Log "Skip restart for Discord (already running)."
+                }
+                else {
+                    Start-ProcessSafe -Command $discordUpdater -Args "--processStart Discord.exe"
+                }
             }
         }
     }
@@ -444,12 +498,17 @@ function Invoke-RestartBuiltIn {
             }
 
             if (Test-Path $oneDrivePath) {
-                # automatic start via Explorer
-                # /background SIlent mode
-                Start-Process "explorer.exe" -ArgumentList "`"$oneDrivePath`" /background"
-                
-                Write-Log "OneDrive started via Explorer (non-elevated)."
-                Write-Success "OneDrive succesful started."
+                if (Test-ProcessRunning -Name 'OneDrive') {
+                    Write-Log "Skip restart for OneDrive (already running)."
+                }
+                else {
+                    # automatic start via Explorer
+                    # /background silent mode
+                    Start-Process "explorer.exe" -ArgumentList "`"$oneDrivePath`" /background"
+
+                    Write-Log "OneDrive started via Explorer (non-elevated)."
+                    Write-Success "OneDrive succesful started."
+                }
             } else {
                 Write-Log "OneDrive Pfad not found." -Level WARN
                 Write-Warn "OneDrive executable not found."
@@ -462,7 +521,12 @@ function Invoke-RestartBuiltIn {
         if ($Config.RestoreOnlyActiveApps -eq $false -or 'CCleaner64' -in $Global:PreSessionRunningApps) {
             $ccleaner = "C:\Program Files\CCleaner\CCleaner64.exe"
             if (Test-Path $ccleaner) {
-                Start-ProcessSafe -Command $ccleaner -Args "/MONITOR"
+                if (Test-ProcessRunning -Name 'CCleaner64') {
+                    Write-Log "Skip restart for CCleaner (already running)."
+                }
+                else {
+                    Start-ProcessSafe -Command $ccleaner -Args "/MONITOR"
+                }
             }
         }
     }
@@ -473,11 +537,16 @@ function Invoke-RestartBuiltIn {
             $storePath = "C:\Program Files\WindowsApps\AppleInc.iCloud_*"
             $desktopPath = "C:\Program Files (x86)\Common Files\Apple\Internet Services\iCloud.exe"
 
-            if (Get-ChildItem $storePath -ErrorAction SilentlyContinue) {
-                Start-ProcessSafe -Command "explorer.exe" -Args "shell:AppsFolder\AppleInc.iCloud_skh98v6769f6t!iCloud"
+            if (Test-ProcessRunning -Name 'iCloud') {
+                Write-Log "Skip restart for iCloud (already running)."
             }
-            elseif (Test-Path $desktopPath) {
-                Start-ProcessSafe -Command $desktopPath
+            else {
+                if (Get-ChildItem $storePath -ErrorAction SilentlyContinue) {
+                    Start-ProcessSafe -Command "explorer.exe" -Args "shell:AppsFolder\AppleInc.iCloud_skh98v6769f6t!iCloud"
+                }
+                elseif (Test-Path $desktopPath) {
+                    Start-ProcessSafe -Command $desktopPath
+                }
             }
         }
     }
@@ -493,6 +562,11 @@ function Invoke-RestartCustom {
 
     foreach ($entry in $Config.Restart.Custom) {
         if (-not $entry.Command) { continue }
+        $procName = Get-ProcessNameFromCommand -Command $entry.Command
+        if ($procName -and (Test-ProcessRunning -Name $procName)) {
+            Write-Log "Skip restart for custom app '$($entry.Command)' (already running as process '$procName')."
+            continue
+        }
         Start-ProcessSafe -Command $entry.Command -Args $entry.Args
     }
 }
