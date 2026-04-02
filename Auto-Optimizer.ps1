@@ -926,36 +926,66 @@ function Launch-StoreSim {
 function Launch-DCSStandalone {
     Write-Info "Launching DCS Standalone..."
 
-    $possiblePaths = @(
+    # First check if a custom path is provided in games.json
+    $gameEntry = $Global:GamesList | Where-Object { $_.Id -eq "7" } | Select-Object -First 1
+    $possiblePaths = @()
+    
+    if ($gameEntry -and $gameEntry.Path) {
+        Write-Log "Custom DCS path found in games.json: $($gameEntry.Path)" -Level DEBUG
+        if (Test-Path $gameEntry.Path) {
+            $customItem = Get-Item $gameEntry.Path -ErrorAction SilentlyContinue
+            if ($customItem -and $customItem.PSIsContainer) {
+                $possiblePaths += (Join-Path $gameEntry.Path 'DCS.exe')
+            }
+            else {
+                $possiblePaths += $gameEntry.Path
+            }
+        }
+    }
+    
+    # Always include standard paths as fallback
+    $possiblePaths += @(
+        "C:\Program Files\Eagle Dynamics\DCS World\bin\DCS.exe",
         "C:\Eagle Dynamics\DCS World\bin\DCS.exe",
         "C:\DCS World\bin\DCS.exe"
     )
 
-    # Search drives C-J
-    foreach ($drive in 'C'..'J') {
-        $path = "$drive`:\Eagle Dynamics\DCS World\bin\DCS.exe"
-        if (Test-Path $path) { $possiblePaths += $path }
+    # Search all available filesystem drives
+    foreach ($drive in (Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Name)) {
+        $root = "$drive`:"
 
-        $path2 = "$drive`:\DCS World\bin\DCS.exe"
+        $path1 = Join-Path $root 'Eagle Dynamics\DCS World\bin\DCS.exe'
+        if (Test-Path $path1) { $possiblePaths += $path1 }
+
+        $path2 = Join-Path $root 'DCS World\bin\DCS.exe'
         if (Test-Path $path2) { $possiblePaths += $path2 }
+
+        $path3 = Join-Path $root 'Program Files\Eagle Dynamics\DCS World\bin\DCS.exe'
+        if (Test-Path $path3) { $possiblePaths += $path3 }
     }
 
     $exe = $possiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
 
     if (-not $exe) {
         Write-ErrorUI "DCS Standalone not found."
-        Write-Log "DCS Standalone not found." -Level ERROR
+        Write-Log "DCS Standalone not found. Searched paths: $($possiblePaths -join '; ')" -Level ERROR
         return
     }
 
+    Write-Log "Found DCS Standalone at: $exe" -Level DEBUG
     Write-Log "Launching DCS Standalone: $exe"
 
     try {
-        Start-Process -FilePath $exe
+        $workDir = Split-Path -Parent $exe
+        Write-Log "Working directory: $workDir" -Level DEBUG
+        Start-Process -FilePath $exe -WorkingDirectory $workDir
+        Write-Success "DCS Standalone launched"
+        Write-Log "DCS Standalone process started successfully"
+        Start-Sleep -Seconds 3
     }
     catch {
         Write-Log "Failed to launch DCS Standalone: $_" -Level ERROR
-        Write-ErrorUI "Failed to launch DCS Standalone."
+        Write-ErrorUI "Failed to launch DCS Standalone: $_"
     }
 }
 
@@ -976,18 +1006,24 @@ function Launch-XPlaneStandalone {
 
     if (-not $exe) {
         Write-ErrorUI "X-Plane 12 Standalone not found."
-        Write-Log "X-Plane Standalone not found." -Level ERROR
+        Write-Log "X-Plane Standalone not found. Searched paths: $($paths -join '; ')" -Level ERROR
         return
     }
 
+    Write-Log "Found X-Plane Standalone at: $exe" -Level DEBUG
     Write-Log "Launching X-Plane Standalone: $exe"
 
     try {
-        Start-Process -FilePath $exe
+        $workDir = Split-Path -Parent $exe
+        Write-Log "Working directory: $workDir" -Level DEBUG
+        Start-Process -FilePath $exe -WorkingDirectory $workDir
+        Write-Success "X-Plane Standalone launched"
+        Write-Log "X-Plane Standalone process started successfully"
+        Start-Sleep -Seconds 3
     }
     catch {
         Write-Log "Failed to launch X-Plane Standalone: $_" -Level ERROR
-        Write-ErrorUI "Failed to launch X-Plane Standalone."
+        Write-ErrorUI "Failed to launch X-Plane Standalone: $_"
     }
 }
 

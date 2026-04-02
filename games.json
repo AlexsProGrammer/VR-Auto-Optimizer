@@ -78,5 +78,108 @@
         "Path": null,
         "ExeName": "X-Plane.exe",
         "IsVR": true
+    },
+    {
+        "Id": "10",
+        "Name": "Euro Truck Simulator 2 (Steam)",
+        "Method": "Steam",
+        "AppId": "227300",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "eurotrucks2.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "11",
+        "Name": "American Truck Simulator (Steam)",
+        "Method": "Steam",
+        "AppId": "270880",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "americantrucksimulator.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "12",
+        "Name": "Elite Dangerous (Steam)",
+        "Method": "Steam",
+        "AppId": "359320",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "EliteDangerous.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "13",
+        "Name": "No Mans Sky (Steam)",
+        "Method": "Steam",
+        "AppId": "275850",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "NoMansSky.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "14",
+        "Name": "Assetto Corsa (Steam)",
+        "Method": "Steam",
+        "AppId": "244210",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "acs.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "15",
+        "Name": "Assetto Corsa Competizione (Steam)",
+        "Method": "Steam",
+        "AppId": "805550",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "acc.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "16",
+        "Name": "Project CARS (Steam)",
+        "Method": "Steam",
+        "AppId": "224760",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "ProjectCARS.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "17",
+        "Name": "Project CARS 2 (Steam)",
+        "Method": "Steam",
+        "AppId": "378860",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "ProjectCARS2.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "18",
+        "Name": "Project CARS 3 (Steam)",
+        "Method": "Steam",
+        "AppId": "1286680",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "ProjectCARS3.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "19",
+        "Name": "Half-Life: Alyx (Steam)",
+        "Method": "Steam",
+        "AppId": "540050",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "Half-Life Alyx.exe",
+        "IsVR": true
+
     }
+
+
 ]
