@@ -131,6 +131,78 @@ function Write-ErrorUI { param($t) Write-Host $t -ForegroundColor Red }
 function Write-Success { param($t) Write-Host $t -ForegroundColor Green }
 function Write-White   { param($t) Write-Host $t -ForegroundColor White }
 
+function Get-RemovalIndex {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Text,
+        [Parameter(Mandatory)]
+        [int]$MaxCount
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+
+    $trimmed = $Text.Trim()
+    if ($trimmed -notmatch '^[0-9]+$') { return $null }
+
+    $index = [int]$trimmed
+    if ($index -lt 1 -or $index -gt $MaxCount) { return $null }
+
+    return ($index - 1)
+}
+
+function Remove-ArrayItemAtIndex {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$Items,
+        [Parameter(Mandatory)]
+        [int]$IndexToRemove
+    )
+
+    $result = @()
+    for ($i = 0; $i -lt $Items.Count; $i++) {
+        if ($i -ne $IndexToRemove) {
+            $result += ,$Items[$i]
+        }
+    }
+
+    return $result
+}
+
+function ConvertTo-HashtableDeep {
+    param(
+        [Parameter(ValueFromPipeline = $true)]
+        $InputObject
+    )
+
+    if ($null -eq $InputObject) { return $null }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $hash = @{}
+        foreach ($key in $InputObject.Keys) {
+            $hash[$key] = ConvertTo-HashtableDeep -InputObject $InputObject[$key]
+        }
+        return $hash
+    }
+
+    if ($InputObject -is [System.Array] -or ($InputObject -is [System.Collections.IEnumerable] -and -not ($InputObject -is [string]))) {
+        $items = @()
+        foreach ($item in $InputObject) {
+            $items += ,(ConvertTo-HashtableDeep -InputObject $item)
+        }
+        return ,$items
+    }
+
+    if ($InputObject -is [pscustomobject]) {
+        $hash = @{}
+        foreach ($property in $InputObject.PSObject.Properties) {
+            $hash[$property.Name] = ConvertTo-HashtableDeep -InputObject $property.Value
+        }
+        return $hash
+    }
+
+    return $InputObject
+}
+
 # Input helper
 function Read-Choice {
     param(
@@ -171,6 +243,14 @@ $DefaultConfig = @{
         iCloud          = $true
         Custom          = @()   # array of @{ Command=""; Args="" }
     }
+    Exception = @{
+        VSCode          = $false
+        Spotify         = $false
+        Steam           = $false
+        Discord         = $false
+        TeamSpeak       = $false
+        Custom          = @()   # array of process names
+    }
     DefaultSim              = $null
     AutoRunOnStart          = $false
     RestoreOnlyActiveApps   = $true
@@ -203,7 +283,7 @@ function Load-Config {
 
     try {
         $json = Get-Content -Path $ConfigPath -Raw
-        $config = $json | ConvertFrom-Json -AsHashtable
+        $config = ConvertTo-HashtableDeep -InputObject ($json | ConvertFrom-Json)
 
         # Validate structure and fill missing keys
         foreach ($key in $DefaultConfig.Keys) {
@@ -213,7 +293,7 @@ function Load-Config {
         }
 
         # Validate nested keys
-        foreach ($section in @('Kill','Restart')) {
+        foreach ($section in @('Kill','Restart','Exception')) {
             foreach ($key in $DefaultConfig[$section].Keys) {
                 if (-not $config[$section].ContainsKey($key)) {
                     $config[$section][$key] = $DefaultConfig[$section][$key]
@@ -227,7 +307,6 @@ function Load-Config {
     catch {
         Write-ErrorUI "Config file is corrupted. Creating a new one."
         Write-Log "Config corrupted. Resetting: $_" -Level ERROR
-        Save-Config -Config $DefaultConfig
         return $DefaultConfig
     }
 }
@@ -342,6 +421,11 @@ function Stop-ProcessSafe {
         [string]$Name
     )
 
+    if (Test-IsExceptionProcess -Name $Name) {
+        Write-Log "Skip kill for exception process: $Name"
+        return
+    }
+
     try {
         $proc = Get-Process -Name $Name -ErrorAction SilentlyContinue
         if ($proc) {
@@ -359,6 +443,54 @@ function Stop-ProcessSafe {
         Write-Log "Failed to kill process ${Name}: $_" -Level ERROR
         Write-Warn "Could not kill: $Name"
     }
+}
+
+function Test-IsExceptionProcess {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    if (-not $Config.ContainsKey('Exception')) { return $false }
+
+    $normalized = ($Name -replace '\.exe$','').ToLowerInvariant()
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $candidates.Add($normalized)
+
+    switch ($normalized) {
+        'edge' { $candidates.Add('msedge'); $candidates.Add('microsoftedge') }
+        'msedge' { $candidates.Add('edge'); $candidates.Add('microsoftedge') }
+        'microsoftedge' { $candidates.Add('edge'); $candidates.Add('msedge') }
+        'ccleaner' { $candidates.Add('ccleaner64') }
+        'ccleaner64' { $candidates.Add('ccleaner') }
+        'icloud' { $candidates.Add('icloudservices'); $candidates.Add('iclouddrive') }
+        'icloudservices' { $candidates.Add('icloud'); $candidates.Add('iclouddrive') }
+        'iclouddrive' { $candidates.Add('icloud'); $candidates.Add('icloudservices') }
+    }
+
+    foreach ($custom in $Config.Exception.Custom) {
+        if ([string]::IsNullOrWhiteSpace($custom)) { continue }
+        $customNormalized = ($custom -replace '\.exe$','').ToLowerInvariant()
+        if ($candidates -contains $customNormalized) {
+            return $true
+        }
+    }
+
+    switch ($normalized) {
+        'code' { return [bool]$Config.Exception.VSCode }
+        'spotify' { return [bool]$Config.Exception.Spotify }
+        'steam' { return [bool]$Config.Exception.Steam }
+        'steamwebhelper' { return [bool]$Config.Exception.Steam }
+        'discord' { return [bool]$Config.Exception.Discord }
+        'ts3client_win64' { return [bool]$Config.Exception.TeamSpeak }
+        'ts3client_win32' { return [bool]$Config.Exception.TeamSpeak }
+        'teamspeak' { return [bool]$Config.Exception.TeamSpeak }
+        'teamspeak_client' { return [bool]$Config.Exception.TeamSpeak }
+        'teamspeak5' { return [bool]$Config.Exception.TeamSpeak }
+        'teamspeak6' { return [bool]$Config.Exception.TeamSpeak }
+    }
+
+    return $false
 }
 
 function Test-ProcessRunning {
@@ -465,7 +597,10 @@ function Invoke-RestartBuiltIn {
         # Only restart if enabled AND either RestoreOnlyActiveApps is false OR Edge was previously running
         if ($Config.RestoreOnlyActiveApps -eq $false -or 'msedge' -in $Global:PreSessionRunningApps) {
             $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-            if (Test-Path $edgePath) {
+            if (Test-IsExceptionProcess -Name 'msedge') {
+                Write-Log "Skip restart for exception app: Edge"
+            }
+            elseif (Test-Path $edgePath) {
                 if (Test-ProcessRunning -Name 'msedge') {
                     Write-Log "Skip restart for Edge (already running)."
                 }
@@ -480,7 +615,10 @@ function Invoke-RestartBuiltIn {
         # Only restart if enabled AND either RestoreOnlyActiveApps is false OR Discord was previously running
         if ($Config.RestoreOnlyActiveApps -eq $false -or 'Discord' -in $Global:PreSessionRunningApps) {
             $discordUpdater = Join-Path $env:LOCALAPPDATA "Discord\Update.exe"
-            if (Test-Path $discordUpdater) {
+            if (Test-IsExceptionProcess -Name 'Discord') {
+                Write-Log "Skip restart for exception app: Discord"
+            }
+            elseif (Test-Path $discordUpdater) {
                 if (Test-ProcessRunning -Name 'Discord') {
                     Write-Log "Skip restart for Discord (already running)."
                 }
@@ -499,7 +637,10 @@ function Invoke-RestartBuiltIn {
                 $oneDrivePath = "C:\Program Files\Microsoft OneDrive\OneDrive.exe" 
             }
 
-            if (Test-Path $oneDrivePath) {
+            if (Test-IsExceptionProcess -Name 'OneDrive') {
+                Write-Log "Skip restart for exception app: OneDrive"
+            }
+            elseif (Test-Path $oneDrivePath) {
                 if (Test-ProcessRunning -Name 'OneDrive') {
                     Write-Log "Skip restart for OneDrive (already running)."
                 }
@@ -522,7 +663,10 @@ function Invoke-RestartBuiltIn {
         # Only restart if enabled AND either RestoreOnlyActiveApps is false OR CCleaner was previously running
         if ($Config.RestoreOnlyActiveApps -eq $false -or 'CCleaner64' -in $Global:PreSessionRunningApps) {
             $ccleaner = "C:\Program Files\CCleaner\CCleaner64.exe"
-            if (Test-Path $ccleaner) {
+            if (Test-IsExceptionProcess -Name 'CCleaner64') {
+                Write-Log "Skip restart for exception app: CCleaner"
+            }
+            elseif (Test-Path $ccleaner) {
                 if (Test-ProcessRunning -Name 'CCleaner64') {
                     Write-Log "Skip restart for CCleaner (already running)."
                 }
@@ -539,7 +683,10 @@ function Invoke-RestartBuiltIn {
             $storePath = "C:\Program Files\WindowsApps\AppleInc.iCloud_*"
             $desktopPath = "C:\Program Files (x86)\Common Files\Apple\Internet Services\iCloud.exe"
 
-            if (Test-ProcessRunning -Name 'iCloud') {
+            if (Test-IsExceptionProcess -Name 'iCloud') {
+                Write-Log "Skip restart for exception app: iCloud"
+            }
+            elseif (Test-ProcessRunning -Name 'iCloud') {
                 Write-Log "Skip restart for iCloud (already running)."
             }
             else {
@@ -565,6 +712,10 @@ function Invoke-RestartCustom {
     foreach ($entry in $Config.Restart.Custom) {
         if (-not $entry.Command) { continue }
         $procName = Get-ProcessNameFromCommand -Command $entry.Command
+        if ($procName -and (Test-IsExceptionProcess -Name $procName)) {
+            Write-Log "Skip restart for exception custom app '$($entry.Command)' (process '$procName')."
+            continue
+        }
         if ($procName -and (Test-ProcessRunning -Name $procName)) {
             Write-Log "Skip restart for custom app '$($entry.Command)' (already running as process '$procName')."
             continue
@@ -1105,6 +1256,11 @@ function Launch-XPlaneStandalone {
 }
 
 function Close-SteamForNonSteamLaunch {
+    if (Test-IsExceptionProcess -Name 'steam') {
+        Write-Log "Skip closing Steam for non-Steam launch because Steam is marked as an exception."
+        return
+    }
+
     $Global:SteamWasRunningBeforeNonSteamLaunch = Test-ProcessRunning -Name 'steam'
     $Global:SteamClosedForNonSteamLaunch = $false
 
@@ -1430,11 +1586,20 @@ function Show-ConfigMenu {
         Write-White "    [11] Restart iCloud   = $($Config.Restart.iCloud)"
         Write-Host ""
 
+        Write-White "  Exception Flags (high priority - never kill/restart):"
+        Write-White "    [12] VS Code   = $($Config.Exception.VSCode)"
+        Write-White "    [13] Spotify   = $($Config.Exception.Spotify)"
+        Write-White "    [14] Steam     = $($Config.Exception.Steam)"
+        Write-White "    [15] Discord   = $($Config.Exception.Discord)"
+        Write-White "    [16] TeamSpeak = $($Config.Exception.TeamSpeak)"
+        Write-Host ""
+
         Write-White "  D) Set default sim (current: $($Config.DefaultSim))"
         Write-White "  A) Toggle auto-run on start (AutoRunOnStart = $($Config.AutoRunOnStart))"
         Write-White "  R) Toggle restore only active apps (RestoreOnlyActiveApps = $($Config.RestoreOnlyActiveApps))"
         Write-White ""
         Write-White "  C) Manage custom apps"
+        Write-White "  E) Manage exception apps"
         Write-White "  S) Save and return"
         Write-White "  B) Back without saving"
 
@@ -1451,6 +1616,11 @@ function Show-ConfigMenu {
             '^9$' { Toggle-Flag 'Restart.OneDrive' }
             '^10$' { Toggle-Flag 'Restart.CCleaner' }
             '^11$' { Toggle-Flag 'Restart.iCloud' }
+            '^12$' { Toggle-Flag 'Exception.VSCode' }
+            '^13$' { Toggle-Flag 'Exception.Spotify' }
+            '^14$' { Toggle-Flag 'Exception.Steam' }
+            '^15$' { Toggle-Flag 'Exception.Discord' }
+            '^16$' { Toggle-Flag 'Exception.TeamSpeak' }
             '^[dD]$' { Set-DefaultSim }
             '^[aA]$' {
                 $Config.AutoRunOnStart = -not $Config.AutoRunOnStart
@@ -1458,6 +1628,7 @@ function Show-ConfigMenu {
             }
             '^[rR]$' { Toggle-Flag 'RestoreOnlyActiveApps' }
             '^[cC]$' { Manage-CustomApps }
+            '^[eE]$' { Manage-ExceptionApps }
             '^[sS]$' { Save-Config -Config $Config; return }
             '^[bB]$' { return }
         }
@@ -1535,10 +1706,9 @@ function Add-CustomKill {
 function Remove-CustomKill {
     if ($Config.Kill.Custom.Count -eq 0) { return }
     $idx = Read-Choice -Prompt "Enter index to remove:"
-    if (-not [int]::TryParse($idx, [ref]0)) { return }
-    $i = [int]$idx
-    if ($i -lt 1 -or $i -gt $Config.Kill.Custom.Count) { return }
-    $Config.Kill.Custom = @($Config.Kill.Custom | Select-Object -Index (0..($Config.Kill.Custom.Count-1) | Where-Object { $_ -ne ($i-1) }))
+    $index = Get-RemovalIndex -Text $idx -MaxCount $Config.Kill.Custom.Count
+    if ($null -eq $index) { return }
+    $Config.Kill.Custom = Remove-ArrayItemAtIndex -Items @($Config.Kill.Custom) -IndexToRemove $index
     Save-Config -Config $Config
 }
 
@@ -1558,10 +1728,66 @@ function Add-CustomRestart {
 function Remove-CustomRestart {
     if ($Config.Restart.Custom.Count -eq 0) { return }
     $idx = Read-Choice -Prompt "Enter index to remove:"
-    if (-not [int]::TryParse($idx, [ref]0)) { return }
-    $i = [int]$idx
-    if ($i -lt 1 -or $i -gt $Config.Restart.Custom.Count) { return }
-    $Config.Restart.Custom = @($Config.Restart.Custom | Select-Object -Index (0..($Config.Restart.Custom.Count-1) | Where-Object { $_ -ne ($i-1) }))
+    $index = Get-RemovalIndex -Text $idx -MaxCount $Config.Restart.Custom.Count
+    if ($null -eq $index) { return }
+    $Config.Restart.Custom = Remove-ArrayItemAtIndex -Items @($Config.Restart.Custom) -IndexToRemove $index
+    Save-Config -Config $Config
+}
+
+function Manage-ExceptionApps {
+    while ($true) {
+        Clear-Host
+        Show-Box -Title "EXCEPTION APPS - HIGH PRIORITY"
+
+        Write-White "  These apps are never killed or restarted by the optimizer."
+        Write-Host ""
+
+        Write-White "  Custom Exception List (process names):"
+        if ($Config.Exception.Custom.Count -eq 0) {
+            Write-White "    (none)"
+        }
+        else {
+            $i = 1
+            foreach ($p in $Config.Exception.Custom) {
+                Write-White ("    [{0}] {1}" -f $i, $p)
+                $i++
+            }
+        }
+        Write-Host ""
+
+        Write-White "  1) Add custom exception process"
+        Write-White "  2) Remove custom exception process"
+        Write-White ""
+        Write-White "  B) Back"
+
+        $choice = Read-Choice -Prompt "Selection:"
+        switch ($choice) {
+            '1' { Add-ExceptionCustom }
+            '2' { Remove-ExceptionCustom }
+            'B' { return }
+            'b' { return }
+        }
+    }
+}
+
+function Add-ExceptionCustom {
+    $name = Read-Choice -Prompt "Enter process name to EXCLUDE (without .exe):"
+    if ([string]::IsNullOrWhiteSpace($name)) { return }
+
+    $normalized = ($name -replace '\.exe$','').ToLowerInvariant()
+    $existing = @($Config.Exception.Custom | ForEach-Object { ($_ -replace '\.exe$','').ToLowerInvariant() })
+    if ($normalized -in $existing) { return }
+
+    $Config.Exception.Custom += $name
+    Save-Config -Config $Config
+}
+
+function Remove-ExceptionCustom {
+    if ($Config.Exception.Custom.Count -eq 0) { return }
+    $idx = Read-Choice -Prompt "Enter index to remove:"
+    $index = Get-RemovalIndex -Text $idx -MaxCount $Config.Exception.Custom.Count
+    if ($null -eq $index) { return }
+    $Config.Exception.Custom = Remove-ArrayItemAtIndex -Items @($Config.Exception.Custom) -IndexToRemove $index
     Save-Config -Config $Config
 }
 
