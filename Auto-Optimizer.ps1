@@ -13,6 +13,9 @@ $ConfigPath = Join-Path $ScriptDir 'config.json'
 $GamesPath  = Join-Path $ScriptDir 'games.json'
 $LogFile    = Join-Path $ScriptDir 'sim_launcher.log'
 
+# State Memory: Track running processes before terminating them
+$Global:PreSessionRunningApps = @()
+
 #endregion HEADER & GLOBALS
 
 #region ADMIN ELEVATION
@@ -340,6 +343,11 @@ function Stop-ProcessSafe {
     try {
         $proc = Get-Process -Name $Name -ErrorAction SilentlyContinue
         if ($proc) {
+            # Capture the process name to state memory before stopping it
+            if ($Name -notin $Global:PreSessionRunningApps) {
+                $Global:PreSessionRunningApps += $Name
+                Write-Log "Pre-session app captured: $Name" -Level DEBUG
+            }
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
             Write-Log "Killed process: $Name"
             Write-Success "Killed: $Name"
@@ -408,55 +416,69 @@ function Invoke-RestartBuiltIn {
     Write-Info "Applying built-in restart rules..."
 
     if ($Config.Restart.Edge) {
-        $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-        if (Test-Path $edgePath) {
-            Start-ProcessSafe -Command $edgePath
+        # Only restart if enabled AND either RestoreOnlyActiveApps is false OR Edge was previously running
+        if ($Config.RestoreOnlyActiveApps -eq $false -or 'msedge' -in $Global:PreSessionRunningApps) {
+            $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+            if (Test-Path $edgePath) {
+                Start-ProcessSafe -Command $edgePath
+            }
         }
     }
 
     if ($Config.Restart.Discord) {
-        $discordUpdater = Join-Path $env:LOCALAPPDATA "Discord\Update.exe"
-        if (Test-Path $discordUpdater) {
-            Start-ProcessSafe -Command $discordUpdater -Args "--processStart Discord.exe"
+        # Only restart if enabled AND either RestoreOnlyActiveApps is false OR Discord was previously running
+        if ($Config.RestoreOnlyActiveApps -eq $false -or 'Discord' -in $Global:PreSessionRunningApps) {
+            $discordUpdater = Join-Path $env:LOCALAPPDATA "Discord\Update.exe"
+            if (Test-Path $discordUpdater) {
+                Start-ProcessSafe -Command $discordUpdater -Args "--processStart Discord.exe"
+            }
         }
     }
 
     if ($Config.Restart.OneDrive) {
-    # Path
-    $oneDrivePath = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
-    if (-not (Test-Path $oneDrivePath)) { 
-        $oneDrivePath = "C:\Program Files\Microsoft OneDrive\OneDrive.exe" 
-    }
+        # Only restart if enabled AND either RestoreOnlyActiveApps is false OR OneDrive was previously running
+        if ($Config.RestoreOnlyActiveApps -eq $false -or 'OneDrive' -in $Global:PreSessionRunningApps) {
+            $oneDrivePath = "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe"
+            if (-not (Test-Path $oneDrivePath)) { 
+                $oneDrivePath = "C:\Program Files\Microsoft OneDrive\OneDrive.exe" 
+            }
 
-    if (Test-Path $oneDrivePath) {
-        # automatic start via Explorer
-        # /background SIlent mode
-        Start-Process "explorer.exe" -ArgumentList "`"$oneDrivePath`" /background"
-        
-        Write-Log "OneDrive started via Explorer (non-elevated)."
-        Write-Success "OneDrive succesful started."
-    } else {
-        Write-Log "OneDrive Pfad not found." -Level WARN
-        Write-Warn "OneDrive executable not found."
-    }
+            if (Test-Path $oneDrivePath) {
+                # automatic start via Explorer
+                # /background SIlent mode
+                Start-Process "explorer.exe" -ArgumentList "`"$oneDrivePath`" /background"
+                
+                Write-Log "OneDrive started via Explorer (non-elevated)."
+                Write-Success "OneDrive succesful started."
+            } else {
+                Write-Log "OneDrive Pfad not found." -Level WARN
+                Write-Warn "OneDrive executable not found."
+            }
+        }
     }
 
     if ($Config.Restart.CCleaner) {
-        $ccleaner = "C:\Program Files\CCleaner\CCleaner64.exe"
-        if (Test-Path $ccleaner) {
-            Start-ProcessSafe -Command $ccleaner -Args "/MONITOR"
+        # Only restart if enabled AND either RestoreOnlyActiveApps is false OR CCleaner was previously running
+        if ($Config.RestoreOnlyActiveApps -eq $false -or 'CCleaner64' -in $Global:PreSessionRunningApps) {
+            $ccleaner = "C:\Program Files\CCleaner\CCleaner64.exe"
+            if (Test-Path $ccleaner) {
+                Start-ProcessSafe -Command $ccleaner -Args "/MONITOR"
+            }
         }
     }
 
     if ($Config.Restart.iCloud) {
-        $storePath = "C:\Program Files\WindowsApps\AppleInc.iCloud_*"
-        $desktopPath = "C:\Program Files (x86)\Common Files\Apple\Internet Services\iCloud.exe"
+        # Only restart if enabled AND either RestoreOnlyActiveApps is false OR iCloud was previously running
+        if ($Config.RestoreOnlyActiveApps -eq $false -or 'iCloud' -in $Global:PreSessionRunningApps) {
+            $storePath = "C:\Program Files\WindowsApps\AppleInc.iCloud_*"
+            $desktopPath = "C:\Program Files (x86)\Common Files\Apple\Internet Services\iCloud.exe"
 
-        if (Get-ChildItem $storePath -ErrorAction SilentlyContinue) {
-            Start-ProcessSafe -Command "explorer.exe" -Args "shell:AppsFolder\AppleInc.iCloud_skh98v6769f6t!iCloud"
-        }
-        elseif (Test-Path $desktopPath) {
-            Start-ProcessSafe -Command $desktopPath
+            if (Get-ChildItem $storePath -ErrorAction SilentlyContinue) {
+                Start-ProcessSafe -Command "explorer.exe" -Args "shell:AppsFolder\AppleInc.iCloud_skh98v6769f6t!iCloud"
+            }
+            elseif (Test-Path $desktopPath) {
+                Start-ProcessSafe -Command $desktopPath
+            }
         }
     }
 }
@@ -1055,6 +1077,16 @@ function Invoke-SystemRestore {
     Write-Info "Restoring system state..."
     Write-Log "System restore started."
 
+    # Log pre-session app state
+    if ($Global:PreSessionRunningApps.Count -gt 0) {
+        $appList = $Global:PreSessionRunningApps -join ', '
+        Write-Info "Restoring pre-session apps: $appList"
+        Write-Log "Pre-session apps to restore: $appList"
+    } else {
+        Write-Info "No pre-session apps to restore (RestoreOnlyActiveApps: $($Config.RestoreOnlyActiveApps))"
+        Write-Log "No pre-session apps captured."
+    }
+
     # Restore services
     Start-ServicesAfterVR
 
@@ -1118,16 +1150,28 @@ function Toggle-Flag {
         [Parameter(Mandatory)][string]$Path
     )
 
-    # Split "Kill.OneDrive" into "Kill" and "OneDrive"
     $parts = $Path.Split('.')
-    $section = $parts[0]
-    $key     = $parts[1]
-
-    $current = $Config[$section][$key]
-
-    if ($current -is [bool]) {
-        $Config[$section][$key] = -not $current
-        Save-Config -Config $Config
+    
+    if ($parts.Count -eq 2) {
+        # Nested property like "Kill.OneDrive"
+        $section = $parts[0]
+        $key     = $parts[1]
+        $current = $Config[$section][$key]
+        
+        if ($current -is [bool]) {
+            $Config[$section][$key] = -not $current
+            Save-Config -Config $Config
+        }
+    }
+    elseif ($parts.Count -eq 1) {
+        # Top-level property like "RestoreOnlyActiveApps"
+        $key     = $parts[0]
+        $current = $Config[$key]
+        
+        if ($current -is [bool]) {
+            $Config[$key] = -not $current
+            Save-Config -Config $Config
+        }
     }
 }
 
@@ -1156,6 +1200,7 @@ function Show-ConfigMenu {
 
         Write-White "  D) Set default sim (current: $($Config.DefaultSim))"
         Write-White "  A) Toggle auto-run on start (AutoRunOnStart = $($Config.AutoRunOnStart))"
+        Write-White "  R) Toggle restore only active apps (RestoreOnlyActiveApps = $($Config.RestoreOnlyActiveApps))"
         Write-White ""
         Write-White "  C) Manage custom apps"
         Write-White "  S) Save and return"
@@ -1179,6 +1224,7 @@ function Show-ConfigMenu {
                 $Config.AutoRunOnStart = -not $Config.AutoRunOnStart
                 Save-Config -Config $Config
             }
+            '^[rR]$' { Toggle-Flag 'RestoreOnlyActiveApps' }
             '^[cC]$' { Manage-CustomApps }
             '^[sS]$' { Save-Config -Config $Config; return }
             '^[bB]$' { return }
