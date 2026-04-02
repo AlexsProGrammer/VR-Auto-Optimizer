@@ -1425,7 +1425,7 @@ function Main-Loop {
             '^1$' {
                 while ($true) {
                     Show-SimMenu
-                    $sel = Read-Choice -Prompt "Selection (1-9/B/X):"
+                    $sel = Read-Choice -Prompt "Selection (1-$($Global:GamesList.Count + 1)/B/X):"
                     if ($sel -match '^[xX]$') { Close-LogSession; exit }
                     if ($sel -match '^[bB]$') { break }
                     if ($null -eq (Get-GameById -Id $sel)) {
