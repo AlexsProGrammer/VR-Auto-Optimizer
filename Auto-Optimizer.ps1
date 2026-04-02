@@ -15,6 +15,8 @@ $LogFile    = Join-Path $ScriptDir 'sim_launcher.log'
 
 # State Memory: Track running processes before terminating them
 $Global:PreSessionRunningApps = @()
+$Global:SteamWasRunningBeforeNonSteamLaunch = $false
+$Global:SteamClosedForNonSteamLaunch = $false
 
 #endregion HEADER & GLOBALS
 
@@ -957,7 +959,8 @@ function Launch-SteamSim {
     Write-Log "Launching Steam appid $AppId"
 
     try {
-        Start-Process "steam://run/$AppId"
+        # Use Explorer URI dispatch so Steam launches in normal user context.
+        Start-ProcessSafe -Command 'explorer.exe' -Args "steam://run/$AppId"
     }
     catch {
         Write-Log "Failed to launch Steam app ${AppId}: $_" -Level ERROR
@@ -1102,12 +1105,44 @@ function Launch-XPlaneStandalone {
 }
 
 function Close-SteamForNonSteamLaunch {
+    $Global:SteamWasRunningBeforeNonSteamLaunch = Test-ProcessRunning -Name 'steam'
+    $Global:SteamClosedForNonSteamLaunch = $false
+
+    if (-not $Global:SteamWasRunningBeforeNonSteamLaunch) {
+        Write-Log "Steam is not running; no close needed for non-Steam launch."
+        return
+    }
+
     Write-Info "Non-Steam title selected. Closing Steam processes..."
     Write-Log "Closing Steam processes for non-Steam launch."
 
     foreach ($name in @('steam', 'steamwebhelper')) {
         Stop-ProcessSafe -Name $name
     }
+
+    $Global:SteamClosedForNonSteamLaunch = -not (Test-ProcessRunning -Name 'steam')
+    if ($Global:SteamClosedForNonSteamLaunch) {
+        Write-Log "Steam closed for non-Steam launch; it will be restored at session end."
+    }
+}
+
+function Restore-SteamAfterNonSteamLaunch {
+    if (-not $Global:SteamWasRunningBeforeNonSteamLaunch) {
+        return
+    }
+
+    if (-not $Global:SteamClosedForNonSteamLaunch) {
+        return
+    }
+
+    if (Test-ProcessRunning -Name 'steam') {
+        Write-Log "Skip Steam restore (already running)."
+        return
+    }
+
+    Write-Info "Restoring Steam (normal user context)..."
+    Write-Log "Restoring Steam after non-Steam launch."
+    Start-ProcessSafe -Command 'explorer.exe' -Args 'steam://open/main'
 }
 
 # ------------------------------------------------------------
@@ -1295,8 +1330,15 @@ function Invoke-SystemRestore {
     # Restart built-in apps
     Invoke-RestartBuiltIn
 
+    # Restore Steam only if this session closed it for a non-Steam launch
+    Restore-SteamAfterNonSteamLaunch
+
     # Restart custom apps
     Invoke-RestartCustom
+
+    # Reset per-run Steam state flags
+    $Global:SteamWasRunningBeforeNonSteamLaunch = $false
+    $Global:SteamClosedForNonSteamLaunch = $false
 
     Write-Log "System restore completed."
     Write-Success "System restored."
