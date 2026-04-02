@@ -1027,6 +1027,15 @@ function Launch-XPlaneStandalone {
     }
 }
 
+function Close-SteamForNonSteamLaunch {
+    Write-Info "Non-Steam title selected. Closing Steam processes..."
+    Write-Log "Closing Steam processes for non-Steam launch."
+
+    foreach ($name in @('steam', 'steamwebhelper')) {
+        Stop-ProcessSafe -Name $name
+    }
+}
+
 # ------------------------------------------------------------
 # Detect running sim process
 # ------------------------------------------------------------
@@ -1140,6 +1149,10 @@ function Launch-Simulator {
 
     Write-Info "Launching: $($sim.Name)"
     Write-Log "Launching simulator: $($sim.Name)"
+
+    if ($sim.Method -ne 'Steam') {
+        Close-SteamForNonSteamLaunch
+    }
 
     switch ($sim.Method) {
         "Steam"            { Launch-SteamSim -AppId $sim.AppId }
