@@ -214,6 +214,78 @@ function Read-Choice {
     return Read-Host
 }
 
+function ConvertTo-NormalizedProcessName {
+    param(
+        [Parameter(Mandatory)]
+        [string]$InputValue
+    )
+
+    if ([string]::IsNullOrWhiteSpace($InputValue)) { return $null }
+
+    $leaf = Split-Path -Leaf $InputValue
+    if ([string]::IsNullOrWhiteSpace($leaf)) {
+        $leaf = $InputValue
+    }
+
+    $normalized = ($leaf -replace '\.exe$','').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $null }
+
+    return $normalized
+}
+
+function Test-ExecutablePath {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+
+    return ([string]::Equals([System.IO.Path]::GetExtension($Path), '.exe', [System.StringComparison]::OrdinalIgnoreCase))
+}
+
+function Select-ExecutableFile {
+    param(
+        [string]$Title = 'Select executable file',
+        [string]$InitialDirectory = $null
+    )
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+    }
+    catch {
+        Write-ErrorUI 'File picker is not available on this system.'
+        Write-Log "Failed to load System.Windows.Forms for file picker: $_" -Level ERROR
+        return $null
+    }
+
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = $Title
+    $dialog.Filter = 'Executable files (*.exe)|*.exe|All files (*.*)|*.*'
+    $dialog.CheckFileExists = $true
+    $dialog.Multiselect = $false
+
+    if ($InitialDirectory -and (Test-Path -LiteralPath $InitialDirectory -PathType Container)) {
+        $dialog.InitialDirectory = $InitialDirectory
+    }
+    elseif (Test-Path -LiteralPath $env:ProgramFiles -PathType Container) {
+        $dialog.InitialDirectory = $env:ProgramFiles
+    }
+
+    $result = $dialog.ShowDialog()
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+        return $null
+    }
+
+    if (-not (Test-ExecutablePath -Path $dialog.FileName)) {
+        Write-ErrorUI 'Please select a valid .exe file.'
+        return $null
+    }
+
+    return $dialog.FileName
+}
+
 #endregion UI FRAMEWORK
 #region CONFIG SYSTEM
 <#
@@ -257,6 +329,80 @@ $DefaultConfig = @{
     CustomAppsToStartAfter  = ""
 }
 
+function Normalize-CustomConfigLists {
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Config
+    )
+
+    # Kill.Custom must always be an array of process-name strings.
+    $killItems = @($Config.Kill.Custom)
+    if ($null -eq $Config.Kill.Custom) { $killItems = @() }
+
+    $normalizedKill = @()
+    foreach ($item in $killItems) {
+        if ([string]::IsNullOrWhiteSpace([string]$item)) { continue }
+        $name = ConvertTo-NormalizedProcessName -InputValue ([string]$item)
+        if (-not $name) { continue }
+
+        $nameKey = $name.ToLowerInvariant()
+        $existing = @($normalizedKill | ForEach-Object { $_.ToLowerInvariant() })
+        if ($nameKey -in $existing) { continue }
+
+        $normalizedKill += ,$name
+    }
+    $Config.Kill.Custom = $normalizedKill
+
+    # Exception.Custom must always be an array of process-name strings.
+    $exceptionItems = @($Config.Exception.Custom)
+    if ($null -eq $Config.Exception.Custom) { $exceptionItems = @() }
+
+    $normalizedException = @()
+    foreach ($item in $exceptionItems) {
+        if ([string]::IsNullOrWhiteSpace([string]$item)) { continue }
+        $name = ConvertTo-NormalizedProcessName -InputValue ([string]$item)
+        if (-not $name) { continue }
+
+        $nameKey = $name.ToLowerInvariant()
+        $existing = @($normalizedException | ForEach-Object { $_.ToLowerInvariant() })
+        if ($nameKey -in $existing) { continue }
+
+        $normalizedException += ,$name
+    }
+    $Config.Exception.Custom = $normalizedException
+
+    # Restart.Custom must always be an array of @{ Command=''; Args='' } objects.
+    $restartItems = @($Config.Restart.Custom)
+    if ($null -eq $Config.Restart.Custom) { $restartItems = @() }
+
+    $normalizedRestart = @()
+    foreach ($item in $restartItems) {
+        if ($null -eq $item) { continue }
+
+        $command = $null
+        $args = ''
+
+        if ($item -is [System.Collections.IDictionary]) {
+            if ($item.Contains('Command')) { $command = [string]$item['Command'] }
+            if ($item.Contains('Args')) { $args = [string]$item['Args'] }
+        }
+        elseif ($item -is [pscustomobject]) {
+            if ($null -ne $item.PSObject.Properties['Command']) { $command = [string]$item.Command }
+            if ($null -ne $item.PSObject.Properties['Args']) { $args = [string]$item.Args }
+        }
+        else {
+            $command = [string]$item
+        }
+
+        if ([string]::IsNullOrWhiteSpace($command)) { continue }
+        $normalizedRestart += ,([ordered]@{
+            Command = $command
+            Args    = $args
+        })
+    }
+    $Config.Restart.Custom = $normalizedRestart
+}
+
 function Save-Config {
     param(
         [Parameter(Mandatory)]
@@ -264,6 +410,7 @@ function Save-Config {
     )
 
     try {
+        Normalize-CustomConfigLists -Config $Config
         $json = $Config | ConvertTo-Json -Depth 10 -Compress
         Set-Content -Path $ConfigPath -Value $json -Encoding UTF8
         Write-Log "Configuration saved to $ConfigPath"
@@ -300,6 +447,8 @@ function Load-Config {
                 }
             }
         }
+
+        Normalize-CustomConfigLists -Config $config
 
         Write-Log "Configuration loaded from $ConfigPath"
         return $config
@@ -1653,12 +1802,15 @@ function Manage-CustomApps {
         Clear-Host
         Show-Box -Title "CUSTOM APPS - KILL / RESTART"
 
+        $killCustom = @($Config.Kill.Custom)
+        $restartCustom = @($Config.Restart.Custom)
+
         Write-White "  Custom Kill List (process names):"
-        if ($Config.Kill.Custom.Count -eq 0) {
+        if ($killCustom.Count -eq 0) {
             Write-White "    (none)"
         } else {
             $i = 1
-            foreach ($p in $Config.Kill.Custom) {
+            foreach ($p in $killCustom) {
                 Write-White ("    [{0}] {1}" -f $i, $p)
                 $i++
             }
@@ -1666,11 +1818,11 @@ function Manage-CustomApps {
         Write-Host ""
 
         Write-White "  Custom Restart List (Command + Args):"
-        if ($Config.Restart.Custom.Count -eq 0) {
+        if ($restartCustom.Count -eq 0) {
             Write-White "    (none)"
         } else {
             $i = 1
-            foreach ($entry in $Config.Restart.Custom) {
+            foreach ($entry in $restartCustom) {
                 Write-White ("    [{0}] {1} {2}" -f $i, $entry.Command, $entry.Args)
                 $i++
             }
@@ -1697,23 +1849,58 @@ function Manage-CustomApps {
 }
 
 function Add-CustomKill {
-    $name = Read-Choice -Prompt "Enter process name to kill (without .exe):"
+    Write-White "  Add kill app via:"
+    Write-White "    [1] Manual process name"
+    Write-White "    [2] Browse for executable"
+    $mode = Read-Choice -Prompt "Select option (blank to cancel):"
+
+    $name = $null
+    switch ($mode.Trim()) {
+        '1' { $name = Read-Choice -Prompt "Enter process name to kill (without .exe):" }
+        '2' {
+            $selectedPath = Select-ExecutableFile -Title 'Select executable to add to custom kill list'
+            if ([string]::IsNullOrWhiteSpace($selectedPath)) { return }
+            $name = ConvertTo-NormalizedProcessName -InputValue $selectedPath
+        }
+        default { return }
+    }
+
     if ([string]::IsNullOrWhiteSpace($name)) { return }
-    $Config.Kill.Custom += $name
+
+    $normalized = ($name -replace '\.exe$','').ToLowerInvariant()
+    $existing = @($Config.Kill.Custom | ForEach-Object { ($_ -replace '\.exe$','').ToLowerInvariant() })
+    if ($normalized -in $existing) { return }
+
+    $Config.Kill.Custom += ($name -replace '\.exe$','')
     Save-Config -Config $Config
 }
 
 function Remove-CustomKill {
-    if ($Config.Kill.Custom.Count -eq 0) { return }
+    $killCustom = @($Config.Kill.Custom)
+    if ($killCustom.Count -eq 0) { return }
     $idx = Read-Choice -Prompt "Enter index to remove:"
-    $index = Get-RemovalIndex -Text $idx -MaxCount $Config.Kill.Custom.Count
+    $index = Get-RemovalIndex -Text $idx -MaxCount $killCustom.Count
     if ($null -eq $index) { return }
-    $Config.Kill.Custom = Remove-ArrayItemAtIndex -Items @($Config.Kill.Custom) -IndexToRemove $index
+    $Config.Kill.Custom = Remove-ArrayItemAtIndex -Items $killCustom -IndexToRemove $index
     Save-Config -Config $Config
 }
 
 function Add-CustomRestart {
-    $cmd = Read-Choice -Prompt "Enter full command path:"
+    Write-White "  Add restart app via:"
+    Write-White "    [1] Manual command path"
+    Write-White "    [2] Browse for executable"
+    $mode = Read-Choice -Prompt "Select option (blank to cancel):"
+
+    $cmd = $null
+    switch ($mode.Trim()) {
+        '1' { $cmd = Read-Choice -Prompt "Enter full command path:" }
+        '2' {
+            $cmd = Select-ExecutableFile -Title 'Select executable to add to custom restart list'
+            if ([string]::IsNullOrWhiteSpace($cmd)) { return }
+        }
+        default { return }
+    }
+
     if ([string]::IsNullOrWhiteSpace($cmd)) { return }
     $args = Read-Choice -Prompt "Enter arguments (optional):"
 
@@ -1726,11 +1913,12 @@ function Add-CustomRestart {
 }
 
 function Remove-CustomRestart {
-    if ($Config.Restart.Custom.Count -eq 0) { return }
+    $restartCustom = @($Config.Restart.Custom)
+    if ($restartCustom.Count -eq 0) { return }
     $idx = Read-Choice -Prompt "Enter index to remove:"
-    $index = Get-RemovalIndex -Text $idx -MaxCount $Config.Restart.Custom.Count
+    $index = Get-RemovalIndex -Text $idx -MaxCount $restartCustom.Count
     if ($null -eq $index) { return }
-    $Config.Restart.Custom = Remove-ArrayItemAtIndex -Items @($Config.Restart.Custom) -IndexToRemove $index
+    $Config.Restart.Custom = Remove-ArrayItemAtIndex -Items $restartCustom -IndexToRemove $index
     Save-Config -Config $Config
 }
 
@@ -1739,16 +1927,18 @@ function Manage-ExceptionApps {
         Clear-Host
         Show-Box -Title "EXCEPTION APPS - HIGH PRIORITY"
 
+        $exceptionCustom = @($Config.Exception.Custom)
+
         Write-White "  These apps are never killed or restarted by the optimizer."
         Write-Host ""
 
         Write-White "  Custom Exception List (process names):"
-        if ($Config.Exception.Custom.Count -eq 0) {
+        if ($exceptionCustom.Count -eq 0) {
             Write-White "    (none)"
         }
         else {
             $i = 1
-            foreach ($p in $Config.Exception.Custom) {
+            foreach ($p in $exceptionCustom) {
                 Write-White ("    [{0}] {1}" -f $i, $p)
                 $i++
             }
@@ -1771,7 +1961,22 @@ function Manage-ExceptionApps {
 }
 
 function Add-ExceptionCustom {
-    $name = Read-Choice -Prompt "Enter process name to EXCLUDE (without .exe):"
+    Write-White "  Add exception app via:"
+    Write-White "    [1] Manual process name"
+    Write-White "    [2] Browse for executable"
+    $mode = Read-Choice -Prompt "Select option (blank to cancel):"
+
+    $name = $null
+    switch ($mode.Trim()) {
+        '1' { $name = Read-Choice -Prompt "Enter process name to EXCLUDE (without .exe):" }
+        '2' {
+            $selectedPath = Select-ExecutableFile -Title 'Select executable to add to exception list'
+            if ([string]::IsNullOrWhiteSpace($selectedPath)) { return }
+            $name = ConvertTo-NormalizedProcessName -InputValue $selectedPath
+        }
+        default { return }
+    }
+
     if ([string]::IsNullOrWhiteSpace($name)) { return }
 
     $normalized = ($name -replace '\.exe$','').ToLowerInvariant()
@@ -1783,11 +1988,12 @@ function Add-ExceptionCustom {
 }
 
 function Remove-ExceptionCustom {
-    if ($Config.Exception.Custom.Count -eq 0) { return }
+    $exceptionCustom = @($Config.Exception.Custom)
+    if ($exceptionCustom.Count -eq 0) { return }
     $idx = Read-Choice -Prompt "Enter index to remove:"
-    $index = Get-RemovalIndex -Text $idx -MaxCount $Config.Exception.Custom.Count
+    $index = Get-RemovalIndex -Text $idx -MaxCount $exceptionCustom.Count
     if ($null -eq $index) { return }
-    $Config.Exception.Custom = Remove-ArrayItemAtIndex -Items @($Config.Exception.Custom) -IndexToRemove $index
+    $Config.Exception.Custom = Remove-ArrayItemAtIndex -Items $exceptionCustom -IndexToRemove $index
     Save-Config -Config $Config
 }
 
