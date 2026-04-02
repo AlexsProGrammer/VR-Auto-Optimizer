@@ -1056,6 +1056,73 @@ function Wait-ForSimProcess {
     return $null
 }
 
+function Wait-ForDcsSession {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ExeName
+    )
+
+    $procName = ($ExeName -replace '.exe','')
+    $sessionObserved = $false
+    $goneSince = $null
+    $goneGraceSeconds = 20
+    $pollSeconds = 3
+    $startTime = Get-Date
+    $maxSessionHours = 12
+
+    Write-Info "Monitoring DCS launcher/game lifecycle..."
+    Write-Log "DCS monitor started. ProcessName=$procName GoneGraceSeconds=$goneGraceSeconds"
+
+    while ($true) {
+        $all = @()
+        try {
+            $all = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
+        }
+        catch {
+            Write-Log "DCS monitor process query failed: $_" -Level WARN
+        }
+
+        if ($all.Count -gt 0) {
+            if (-not $sessionObserved) {
+                Write-Log "DCS process detected. Session considered active."
+            }
+            $sessionObserved = $true
+            $goneSince = $null
+        }
+
+        if ($all.Count -eq 0) {
+            if (-not $goneSince) {
+                $goneSince = Get-Date
+                if ($sessionObserved) {
+                    Write-Log "DCS process temporarily gone. Starting exit grace timer (${goneGraceSeconds}s)."
+                }
+                else {
+                    Write-Log "No DCS process detected yet. Waiting with grace timer (${goneGraceSeconds}s)." -Level WARN
+                }
+            }
+
+            $elapsed = ((Get-Date) - $goneSince).TotalSeconds
+            if ($elapsed -ge $goneGraceSeconds) {
+                if ($sessionObserved) {
+                    Write-Log "DCS session ended (process stayed absent past grace timer)."
+                    return $true
+                }
+
+                Write-Warn "DCS closed before stable runtime (launcher exit edge case)."
+                Write-Log "DCS session ended early: no process observed through grace timer." -Level WARN
+                return $false
+            }
+        }
+
+        if (((Get-Date) - $startTime).TotalHours -ge $maxSessionHours) {
+            Write-Log "DCS monitor safety timeout reached (${maxSessionHours}h). Forcing restore." -Level WARN
+            return $true
+        }
+
+        Start-Sleep -Seconds $pollSeconds
+    }
+}
+
 # ------------------------------------------------------------
 # MAIN LAUNCH FUNCTION
 # ------------------------------------------------------------
@@ -1396,18 +1463,35 @@ function Run-SimFlow {
     Write-White "  Do not close this window while the simulator is running."
     Write-Host ""
 
-    # Wait for sim exit
-    while (-not $proc.HasExited) {
-        Start-Sleep -Seconds 15
-        try {
-            $proc.Refresh()
-        } catch {
-            break
+    $sim = Get-GameById -Id $SimId
+
+    try {
+        if ($sim.Method -eq 'DCSStandalone') {
+            $completed = Wait-ForDcsSession -ExeName $sim.ExeName
+            if (-not $completed) {
+                Write-Log "DCS session ended before stable game runtime." -Level WARN
+            }
+        }
+        else {
+            # Wait for sim exit
+            while (-not $proc.HasExited) {
+                Start-Sleep -Seconds 15
+                try {
+                    $proc.Refresh()
+                } catch {
+                    break
+                }
+            }
         }
     }
-
-    Write-Info "Simulator exited. Restoring system..."
-    Invoke-SystemRestore -PreviousPowerPlan $prevPlan
+    catch {
+        Write-Warn "Runtime monitor failed unexpectedly. Proceeding to restore."
+        Write-Log "Runtime monitor failure for sim '$($sim.Name)': $_" -Level ERROR
+    }
+    finally {
+        Write-Info "Simulator exited. Restoring system..."
+        Invoke-SystemRestore -PreviousPowerPlan $prevPlan
+    }
 }
 
 function Main-Loop {
@@ -1425,7 +1509,7 @@ function Main-Loop {
             '^1$' {
                 while ($true) {
                     Show-SimMenu
-                    $sel = Read-Choice -Prompt "Selection (1-$($Global:GamesList.Count + 1)/B/X):"
+                    $sel = Read-Choice -Prompt "Selection (1-$($Global:GamesList.Count)/B/X):"
                     if ($sel -match '^[xX]$') { Close-LogSession; exit }
                     if ($sel -match '^[bB]$') { break }
                     if ($null -eq (Get-GameById -Id $sel)) {

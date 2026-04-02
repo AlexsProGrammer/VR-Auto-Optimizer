@@ -179,7 +179,46 @@
         "ExeName": "Half-Life Alyx.exe",
         "IsVR": true
 
+    },
+    {
+        "Id": "20",
+        "Name": "Skyrim VR (Steam)",
+        "Method": "Steam",
+        "AppId": "611670",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "SkyrimVR.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "21",
+        "Name": "Fallout 4 VR (Steam)",
+        "Method": "Steam",
+        "AppId": "611660",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "Fallout4VR.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "22",
+        "Name": "BeamNG.drive (Steam)",
+        "Method": "Steam",
+        "AppId": "284160",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "BeamNG.exe",
+        "IsVR": true
+    },
+    {
+        "Id": "23",
+        "Name": "Ready Or Not (Steam) (VR Mod)",
+        "Method": "Steam",
+        "AppId": "1144200",
+        "StorePattern": null,
+        "Path": null,
+        "ExeName": "ReadyOrNot.exe",
+        "IsVR": true
     }
-
 
 ]
