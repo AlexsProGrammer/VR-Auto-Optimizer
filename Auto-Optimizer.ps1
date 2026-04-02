@@ -17,6 +17,7 @@ $LogFile    = Join-Path $ScriptDir 'sim_launcher.log'
 $Global:PreSessionRunningApps = @()
 $Global:SteamWasRunningBeforeNonSteamLaunch = $false
 $Global:SteamClosedForNonSteamLaunch = $false
+$Global:DisplaySessionState = $null
 
 #endregion HEADER & GLOBALS
 
@@ -323,6 +324,10 @@ $DefaultConfig = @{
         TeamSpeak       = $false
         Custom          = @()   # array of process names
     }
+    Display = @{
+        DisableSecondMonitor = $false
+        LowestQuality        = $false
+    }
     DefaultSim              = $null
     AutoRunOnStart          = $false
     RestoreOnlyActiveApps   = $true
@@ -440,7 +445,7 @@ function Load-Config {
         }
 
         # Validate nested keys
-        foreach ($section in @('Kill','Restart','Exception')) {
+        foreach ($section in @('Kill','Restart','Exception','Display')) {
             foreach ($key in $DefaultConfig[$section].Keys) {
                 if (-not $config[$section].ContainsKey($key)) {
                     $config[$section][$key] = $DefaultConfig[$section][$key]
@@ -708,6 +713,459 @@ function Start-ProcessSafe {
     }
 }
 
+# ----------------------------
+# Display session controls - WinAPI + DisplaySwitch approach
+# ----------------------------
+
+function Initialize-DisplayInterop {
+    if ('DisplayNative' -as [type]) { return }
+
+    $displayNativeCode = @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class DisplayNative
+{
+    public const int ENUM_CURRENT_SETTINGS = -1;
+    public const int ENUM_REGISTRY_SETTINGS = -2;
+    public const int EDS_RAWMODE = 0x00000002;
+
+    public const int CDS_UPDATEREGISTRY = 0x00000001;
+    public const int CDS_TEST = 0x00000002;
+
+    public const int DISP_CHANGE_SUCCESSFUL = 0;
+
+    public const int DM_PELSWIDTH = 0x00080000;
+    public const int DM_PELSHEIGHT = 0x00100000;
+    public const int DM_DISPLAYFREQUENCY = 0x00400000;
+    public const int DM_BITSPERPEL = 0x00040000;
+
+    public const int DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x00000001;
+    public const int DISPLAY_DEVICE_PRIMARY_DEVICE = 0x00000004;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct DEVMODE
+    {
+        private const int CCHDEVICENAME = 32;
+        private const int CCHFORMNAME = 32;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCHDEVICENAME)]
+        public string dmDeviceName;
+        public short dmSpecVersion;
+        public short dmDriverVersion;
+        public short dmSize;
+        public short dmDriverExtra;
+        public int dmFields;
+
+        public int dmPositionX;
+        public int dmPositionY;
+        public int dmDisplayOrientation;
+        public int dmDisplayFixedOutput;
+
+        public short dmColor;
+        public short dmDuplex;
+        public short dmYResolution;
+        public short dmTTOption;
+        public short dmCollate;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = CCHFORMNAME)]
+        public string dmFormName;
+        public short dmLogPixels;
+        public int dmBitsPerPel;
+        public int dmPelsWidth;
+        public int dmPelsHeight;
+        public int dmDisplayFlags;
+        public int dmDisplayFrequency;
+        public int dmICMMethod;
+        public int dmICMIntent;
+        public int dmMediaType;
+        public int dmDitherType;
+        public int dmReserved1;
+        public int dmReserved2;
+        public int dmPanningWidth;
+        public int dmPanningHeight;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct DISPLAY_DEVICE
+    {
+        public int cb;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string DeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceString;
+        public int StateFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+        public string DeviceKey;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool EnumDisplaySettingsEx(string lpszDeviceName, int iModeNum, ref DEVMODE lpDevMode, int dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int ChangeDisplaySettingsEx(string lpszDeviceName, ref DEVMODE lpDevMode, IntPtr hwnd, int dwflags, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool EnumDisplayDevices(string lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
+}
+"@
+
+    Add-Type -TypeDefinition $displayNativeCode -Language CSharp
+}
+
+function New-DevMode {
+    $dm = New-Object DisplayNative+DEVMODE
+    $dm.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type]([DisplayNative+DEVMODE]))
+    return $dm
+}
+
+function Get-DisplayDevices {
+    $devices = @()
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        $screens = [System.Windows.Forms.Screen]::AllScreens
+        foreach ($screen in $screens) {
+            $devices += ,([ordered]@{
+                DeviceName   = [string]$screen.DeviceName
+                DeviceString = [string]$screen.DeviceName
+                IsPrimary    = [bool]$screen.Primary
+                StateFlags   = 0
+            })
+        }
+    }
+    catch {
+        Write-Log "Get-DisplayDevices: Screen API failed, falling back to EnumDisplayDevices: $_" -Level WARN
+    }
+
+    if (@($devices).Count -gt 0) {
+        return @($devices)
+    }
+
+    for ($index = 0; $index -lt 16; $index++) {
+        $dd = New-Object DisplayNative+DISPLAY_DEVICE
+        $dd.cb = [System.Runtime.InteropServices.Marshal]::SizeOf([type]([DisplayNative+DISPLAY_DEVICE]))
+
+        $ok = [DisplayNative]::EnumDisplayDevices($null, [uint32]$index, [ref]$dd, 0)
+        if (-not $ok) { break }
+
+        $attached = (($dd.StateFlags -band [DisplayNative]::DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) -ne 0)
+        if (-not $attached) { continue }
+
+        $isPrimary = (($dd.StateFlags -band [DisplayNative]::DISPLAY_DEVICE_PRIMARY_DEVICE) -ne 0)
+        $devices += ,([ordered]@{
+            DeviceName   = [string]$dd.DeviceName
+            DeviceString = [string]$dd.DeviceString
+            IsPrimary    = $isPrimary
+            StateFlags   = $dd.StateFlags
+        })
+    }
+
+    return @($devices)
+}
+
+function Get-CurrentDisplayMode {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DeviceName
+    )
+
+    $dm = New-DevMode
+    $ok = [DisplayNative]::EnumDisplaySettingsEx($DeviceName, [DisplayNative]::ENUM_CURRENT_SETTINGS, [ref]$dm, 0)
+    if (-not $ok) { return $null }
+
+    return [ordered]@{
+        Width       = [int]$dm.dmPelsWidth
+        Height      = [int]$dm.dmPelsHeight
+        Frequency   = [int]$dm.dmDisplayFrequency
+        BitsPerPel  = [int]$dm.dmBitsPerPel
+    }
+}
+
+function Get-LowestDisplayMode {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DeviceName,
+        [int]$PreferredWidth = 800,
+        [int]$PreferredHeight = 600
+    )
+
+    $modeIndex = 0
+    $allModes = @()
+
+    while ($true) {
+        $dm = New-DevMode
+        $ok = [DisplayNative]::EnumDisplaySettingsEx($DeviceName, $modeIndex, [ref]$dm, [DisplayNative]::EDS_RAWMODE)
+        if (-not $ok) { break }
+
+        if ($dm.dmPelsWidth -ge 640 -and $dm.dmPelsHeight -ge 480) {
+            $allModes += ,([ordered]@{
+                Width      = [int]$dm.dmPelsWidth
+                Height     = [int]$dm.dmPelsHeight
+                Frequency  = [int]$dm.dmDisplayFrequency
+                BitsPerPel = [int]$dm.dmBitsPerPel
+            })
+        }
+
+        $modeIndex++
+    }
+
+    if ($allModes.Count -eq 0) { return $null }
+
+    $dedup = @{}
+    foreach ($m in $allModes) {
+        $key = "{0}x{1}@{2}x{3}" -f $m.Width, $m.Height, $m.Frequency, $m.BitsPerPel
+        if (-not $dedup.ContainsKey($key)) {
+            $dedup[$key] = $m
+        }
+    }
+
+    $modes = @($dedup.Values)
+    $preferred = $modes | Where-Object { $_.Width -eq $PreferredWidth -and $_.Height -eq $PreferredHeight } | Select-Object -First 1
+    if ($preferred) {
+        return $preferred
+    }
+
+    return $modes |
+        Sort-Object `
+            @{ Expression = { $_.Width * $_.Height }; Ascending = $true },
+            @{ Expression = { $_.Width }; Ascending = $true },
+            @{ Expression = { $_.Height }; Ascending = $true },
+            @{ Expression = { if ($_.Frequency -gt 0) { $_.Frequency } else { 9999 } }; Ascending = $true } |
+        Select-Object -First 1
+}
+
+function Set-DisplayMode {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DeviceName,
+        [Parameter(Mandatory)]
+        [int]$Width,
+        [Parameter(Mandatory)]
+        [int]$Height,
+        [int]$Frequency = 0,
+        [int]$BitsPerPel = 0
+    )
+
+    $dm = New-DevMode
+
+    $currentOk = [DisplayNative]::EnumDisplaySettingsEx($DeviceName, [DisplayNative]::ENUM_CURRENT_SETTINGS, [ref]$dm, 0)
+    if (-not $currentOk) {
+        Write-Log "Set-DisplayMode: Could not read current mode for $DeviceName" -Level WARN
+        return $false
+    }
+
+    $dm.dmPelsWidth = $Width
+    $dm.dmPelsHeight = $Height
+    $dm.dmFields = [DisplayNative]::DM_PELSWIDTH -bor [DisplayNative]::DM_PELSHEIGHT
+
+    if ($Frequency -gt 0) {
+        $dm.dmDisplayFrequency = $Frequency
+        $dm.dmFields = $dm.dmFields -bor [DisplayNative]::DM_DISPLAYFREQUENCY
+    }
+
+    if ($BitsPerPel -gt 0) {
+        $dm.dmBitsPerPel = $BitsPerPel
+        $dm.dmFields = $dm.dmFields -bor [DisplayNative]::DM_BITSPERPEL
+    }
+
+    $testResult = [DisplayNative]::ChangeDisplaySettingsEx($DeviceName, [ref]$dm, [IntPtr]::Zero, [DisplayNative]::CDS_TEST, [IntPtr]::Zero)
+    if ($testResult -ne [DisplayNative]::DISP_CHANGE_SUCCESSFUL) {
+        Write-Log "Set-DisplayMode: Test failed for $DeviceName to ${Width}x${Height}. Result=$testResult" -Level WARN
+        return $false
+    }
+
+    $applyResult = [DisplayNative]::ChangeDisplaySettingsEx($DeviceName, [ref]$dm, [IntPtr]::Zero, [DisplayNative]::CDS_UPDATEREGISTRY, [IntPtr]::Zero)
+    if ($applyResult -ne [DisplayNative]::DISP_CHANGE_SUCCESSFUL) {
+        Write-Log "Set-DisplayMode: Apply failed for $DeviceName to ${Width}x${Height}. Result=$applyResult" -Level WARN
+        return $false
+    }
+
+    Write-Log "Set-DisplayMode: Applied ${Width}x${Height} to $DeviceName (Hz=$Frequency, Bpp=$BitsPerPel)."
+    return $true
+}
+
+function Invoke-DisplaySwitch {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('/internal','/extend','/external')]
+        [string]$Mode
+    )
+
+    $exe = Join-Path $env:WINDIR 'System32\DisplaySwitch.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        $exe = 'DisplaySwitch.exe'
+    }
+
+    try {
+        Start-Process -FilePath $exe -ArgumentList $Mode -WindowStyle Hidden -Wait
+        Start-Sleep -Seconds 3
+        Write-Log "DisplaySwitch applied: $Mode"
+        return $true
+    }
+    catch {
+        Write-Log "DisplaySwitch failed for mode ${Mode}: $_" -Level WARN
+        return $false
+    }
+}
+
+function Save-DisplaySessionState {
+    $state = [ordered]@{
+        OriginalModes = @{}
+        SecondMonitorApplied = $false
+        LowQualityApplied = $false
+    }
+
+    try {
+        Initialize-DisplayInterop
+        $devices = @(Get-DisplayDevices)
+        foreach ($device in $devices) {
+            $mode = Get-CurrentDisplayMode -DeviceName $device.DeviceName
+            if ($null -ne $mode) {
+                $state.OriginalModes[$device.DeviceName] = $mode
+                Write-Log "Captured display mode $($device.DeviceName): $($mode.Width)x$($mode.Height) @ $($mode.Frequency)Hz"
+            }
+        }
+    }
+    catch {
+        Write-Log "Failed to capture original display state: $_" -Level WARN
+    }
+    
+    $Global:DisplaySessionState = $state
+}
+
+function Invoke-SecondMonitorSessionChange {
+    if (-not $Config.Display.DisableSecondMonitor) {
+        return
+    }
+
+    try {
+        Initialize-DisplayInterop
+        $activeDisplays = @(Get-DisplayDevices)
+        $activeCountBefore = @($activeDisplays).Count
+
+        if ($activeCountBefore -lt 2) {
+            Write-Log 'Second monitor disable requested, but fewer than two active displays are attached.' -Level WARN
+            return
+        }
+
+        $changed = Invoke-DisplaySwitch -Mode '/internal'
+
+        $activeCountAfter = @((Get-DisplayDevices)).Count
+        if (($activeCountAfter -ge 2) -and $changed) {
+            Write-Log 'DisplaySwitch /internal did not reduce active displays; trying /external fallback.' -Level WARN
+            $changed = Invoke-DisplaySwitch -Mode '/external'
+            $activeCountAfter = @((Get-DisplayDevices)).Count
+        }
+
+        if ($changed) {
+            Write-Log "Display topology reduced from $activeCountBefore to $activeCountAfter active display(s)."
+            if ($null -ne $Global:DisplaySessionState) {
+                $Global:DisplaySessionState.SecondMonitorApplied = $true
+            }
+        }
+        else {
+            Write-Log 'Failed to disable secondary displays via DisplaySwitch.' -Level WARN
+        }
+    }
+    catch {
+        Write-Log "Failed to apply second-monitor change: $_" -Level ERROR
+    }
+}
+
+function Invoke-LowestQualitySessionChange {
+    if (-not $Config.Display.LowestQuality) {
+        return
+    }
+
+    try {
+        Initialize-DisplayInterop
+        $devices = @(Get-DisplayDevices)
+        if (@($devices).Count -eq 0) {
+            Write-Log 'No active display devices found for low-quality mode.' -Level WARN
+            return
+        }
+
+        Write-Log "Low-quality mode: found $(@($devices).Count) active display(s)."
+
+        $changedCount = 0
+
+        foreach ($device in $devices) {
+            $targetMode = Get-LowestDisplayMode -DeviceName $device.DeviceName
+            if ($null -eq $targetMode) {
+                Write-Log "No suitable low mode found for $($device.DeviceName)." -Level WARN
+                continue
+            }
+
+            Write-Log "Low-quality target for $($device.DeviceName): $($targetMode.Width)x$($targetMode.Height) @ $($targetMode.Frequency)Hz"
+            $applied = Set-DisplayMode -DeviceName $device.DeviceName -Width $targetMode.Width -Height $targetMode.Height -Frequency $targetMode.Frequency -BitsPerPel $targetMode.BitsPerPel
+            if ($applied) {
+                $changedCount++
+            }
+        }
+
+        if ($changedCount -gt 0) {
+            if ($null -ne $Global:DisplaySessionState) {
+                $Global:DisplaySessionState.LowQualityApplied = $true
+            }
+            Write-Log "Applied low-quality display mode on $changedCount display(s)."
+        }
+        else {
+            Write-Log 'Low-quality mode requested, but no display mode changes were applied.' -Level WARN
+        }
+    }
+    catch {
+        Write-Log "Failed to apply low-quality display change: $_" -Level ERROR
+    }
+}
+
+function Invoke-DisplaySessionPrep {
+    Write-Info "Preparing display session for VR..."
+    Save-DisplaySessionState
+    Invoke-SecondMonitorSessionChange
+    Invoke-LowestQualitySessionChange
+}
+
+function Restore-DisplaySessionState {
+    if ($null -eq $Global:DisplaySessionState) {
+        return
+    }
+
+    $state = $Global:DisplaySessionState
+    
+    try {
+            Initialize-DisplayInterop
+
+            if ($state.SecondMonitorApplied) {
+                $restoredTopology = Invoke-DisplaySwitch -Mode '/extend'
+                if ($restoredTopology) {
+                    Write-Log 'Restored secondary displays via DisplaySwitch /extend.'
+                }
+                else {
+                    Write-Log 'Failed to restore secondary displays via DisplaySwitch /extend.' -Level WARN
+                }
+            }
+
+            if ($state.OriginalModes.Count -gt 0) {
+                foreach ($deviceName in $state.OriginalModes.Keys) {
+                    $mode = $state.OriginalModes[$deviceName]
+                    $ok = Set-DisplayMode -DeviceName $deviceName -Width $mode.Width -Height $mode.Height -Frequency $mode.Frequency -BitsPerPel $mode.BitsPerPel
+                    if (-not $ok) {
+                        Write-Log "Failed to restore display mode for $deviceName" -Level WARN
+                }
+            }
+        }
+    }
+    catch {
+        Write-Log "Display restoration encountered an error: $_" -Level WARN
+    }
+    finally {
+        $Global:DisplaySessionState = $null
+    }
+}
+
 # ------------------------------------------------------------
 # Built-in KILL actions
 # ------------------------------------------------------------
@@ -922,7 +1380,7 @@ function Set-PCoreAffinity {
 
     try {
         $proc.ProcessorAffinity = $mask
-        $binary = "{0:b}" -f $mask
+        $binary = [Convert]::ToString($mask, 2)
         Write-Log "Applied P-core affinity mask ($mask) binary=[$binary] to $ProcessName"
         Write-Info "Applied P-core affinity to $ProcessName"
     }
@@ -1623,6 +2081,9 @@ function Invoke-SystemRestore {
     # Disable NVIDIA persistence mode
     Disable-NvidiaPersistence
 
+    # Restore display state changed for the session
+    Restore-DisplaySessionState
+
     # Restore previous power plan
     if ($PreviousPowerPlan) {
         Restore-PowerPlan -PreviousGuid $PreviousPowerPlan
@@ -1746,6 +2207,8 @@ function Show-ConfigMenu {
         Write-White "  D) Set default sim (current: $($Config.DefaultSim))"
         Write-White "  A) Toggle auto-run on start (AutoRunOnStart = $($Config.AutoRunOnStart))"
         Write-White "  R) Toggle restore only active apps (RestoreOnlyActiveApps = $($Config.RestoreOnlyActiveApps))"
+        Write-White "  M) Disable second monitor (Display.DisableSecondMonitor = $($Config.Display.DisableSecondMonitor))"
+        Write-White "  L) Lowest quality display mode (Display.LowestQuality = $($Config.Display.LowestQuality))"
         Write-White ""
         Write-White "  C) Manage custom apps"
         Write-White "  E) Manage exception apps"
@@ -1770,6 +2233,8 @@ function Show-ConfigMenu {
             '^14$' { Toggle-Flag 'Exception.Steam' }
             '^15$' { Toggle-Flag 'Exception.Discord' }
             '^16$' { Toggle-Flag 'Exception.TeamSpeak' }
+            '^[mM]$' { Toggle-Flag 'Display.DisableSecondMonitor' }
+            '^[lL]$' { Toggle-Flag 'Display.LowestQuality' }
             '^[dD]$' { Set-DefaultSim }
             '^[aA]$' {
                 $Config.AutoRunOnStart = -not $Config.AutoRunOnStart
@@ -2011,6 +2476,9 @@ function Run-SimFlow {
 
     # System prep
     Invoke-SystemPrep
+
+    # Apply display session changes
+    Invoke-DisplaySessionPrep
 
     # Launch sim
     $proc = Launch-Simulator -SimId $SimId
