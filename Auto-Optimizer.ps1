@@ -67,14 +67,14 @@ function Write-Log {
     - Menu rendering utilities
 #>
 
-# Unicode light box characters
+# ASCII box characters (encoding-safe for Windows PowerShell 5.1)
 $UI = @{
-    TopLeft     = "┌"
-    TopRight    = "┐"
-    BottomLeft  = "└"
-    BottomRight = "┘"
-    Horizontal  = "─"
-    Vertical    = "│"
+    TopLeft     = "+"
+    TopRight    = "+"
+    BottomLeft  = "+"
+    BottomRight = "+"
+    Horizontal  = "-"
+    Vertical    = "|"
 }
 
 function New-BoxLine {
@@ -1066,7 +1066,7 @@ function Invoke-SystemRestore {
         Restore-PowerPlan -PreviousGuid $PreviousPowerPlan
     }
     else {
-        Write-Warn "Previous power plan unknown — skipping restore."
+        Write-Warn "Previous power plan unknown - skipping restore."
         Write-Log "Previous power plan missing; restore skipped." -Level WARN
     }
 
@@ -1093,7 +1093,7 @@ function Invoke-SystemRestore {
 
 function Show-MainMenu {
     Clear-Host
-    Show-Box -Title "VR AUTO-OPTIMIZER — MAIN MENU"
+    Show-Box -Title "VR AUTO-OPTIMIZER - MAIN MENU"
 
     Write-White "  1) Launch Simulator (manual selection)"
     Write-White "  2) Configure App Controls"
@@ -1135,7 +1135,7 @@ function Toggle-Flag {
 function Show-ConfigMenu {
     while ($true) {
         Clear-Host
-        Show-Box -Title "CONFIGURATION — APP CONTROLS"
+        Show-Box -Title "CONFIGURATION - APP CONTROLS"
 
         Write-White "  Kill Flags:"
         Write-White "    [1] OneDrive        = $($Config.Kill.OneDrive)"
@@ -1202,7 +1202,7 @@ function Set-DefaultSim {
 function Manage-CustomApps {
     while ($true) {
         Clear-Host
-        Show-Box -Title "CUSTOM APPS — KILL / RESTART"
+        Show-Box -Title "CUSTOM APPS - KILL / RESTART"
 
         Write-White "  Custom Kill List (process names):"
         if ($Config.Kill.Custom.Count -eq 0) {
